@@ -41,6 +41,19 @@ pub struct XcFuncType {
 //    c_func_info_type: Option<*const ffi_xc::xc_func_info_type>,
 //}
 
+pub fn deriv_length(deriv_name: &str) -> Vec<usize> {
+    // length ratio of functional derivatives: (spin channel == 1, spin channel == 2)
+    match deriv_name {
+        "vrho" => vec![1,2],
+        "vsigma" => vec![1,3],
+        "v2rho2" => vec![1,3],
+        "v2rhosigma" => vec![1,6],
+        "v2sigma2" => vec![1,6],
+        "v3rho3" => vec![1,4],  
+        &_ => todo!()  
+    }
+}
+
 impl XcFuncType {
 
     pub fn xc_version(&self) {
@@ -287,11 +300,8 @@ impl XcFuncType {
         let length = rho.len()/&self.spin_channel;
         let mut exc = vec![0.0; length];
         let mut vrho = vec![0.0; length*&self.spin_channel];
-        let mut vsigma = if self.spin_channel == 1 {
-            vec![0.0; length]
-        } else {
-            vec![0.0; length*3]
-        };
+        let l_vsigma = deriv_length("vsigma")[&self.spin_channel-1];
+        let mut vsigma = vec![0.0; length*l_vsigma];
         unsafe{
             ffi_xc::xc_gga_exc_vxc(
                 self.xc_func_type,
@@ -300,10 +310,61 @@ impl XcFuncType {
                 sigma.as_ptr(),
                 exc.as_mut_ptr(),
                 vrho.as_mut_ptr(),
-         vsigma.as_mut_ptr()
+                vsigma.as_mut_ptr()
             );
         }
         (exc,vrho,vsigma)
+    }
+
+    pub fn lda_exc_vxc_fxc(&self, rho: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let length = rho.len()/&self.spin_channel;
+        //println!("debug rho length: {}",length);
+        let mut exc = vec![0.0; length];
+        let mut vrho = vec![0.0; length*&self.spin_channel];
+        let l_v2rho2 = deriv_length("v2rho2")[&self.spin_channel-1];
+        let mut v2rho2 = vec![0.0; length*l_v2rho2];
+        unsafe{
+            ffi_xc::xc_lda_exc_vxc_fxc(
+                self.xc_func_type,
+                length as u64,
+                rho.as_ptr(),
+                exc.as_mut_ptr(),
+                vrho.as_mut_ptr(),
+                v2rho2.as_mut_ptr()
+            );
+        }
+        (exc,vrho,v2rho2)
+    }
+
+    pub fn gga_exc_vxc_fxc(&self, rho: &[f64], sigma: &[f64]
+                ) -> (Vec<f64>, Vec<f64>, Vec<f64>, 
+                      Vec<f64>, Vec<f64>, Vec<f64>) {
+        let length = rho.len()/&self.spin_channel;
+        let mut exc = vec![0.0; length];
+        let mut vrho = vec![0.0; length*&self.spin_channel];
+        let l_vsigma = deriv_length("vsigma")[&self.spin_channel-1];
+        let mut vsigma = vec![0.0; length*l_vsigma];
+        let l_v2rho2 = deriv_length("v2rho2")[&self.spin_channel-1];
+        let mut v2rho2 = vec![0.0; length*l_v2rho2];
+        let l_v2rhosigma = deriv_length("v2rhosigma")[&self.spin_channel-1];
+        let mut v2rhosigma = vec![0.0; length*l_v2rhosigma];
+        let l_v2sigma2 = deriv_length("v2sigma2")[&self.spin_channel-1];
+        let mut v2sigma2 = vec![0.0; length*l_v2sigma2];
+        unsafe{
+            ffi_xc::xc_gga_exc_vxc_fxc(
+                self.xc_func_type,
+                length as u64,
+                rho.as_ptr(),
+                sigma.as_ptr(),
+                exc.as_mut_ptr(),
+                vrho.as_mut_ptr(),
+                vsigma.as_mut_ptr(),
+                v2rho2.as_mut_ptr(),
+                v2rhosigma.as_mut_ptr(),
+                v2sigma2.as_mut_ptr()
+            );
+        }
+        (exc,vrho,vsigma,v2rho2,v2rhosigma,v2sigma2)
     }
 
     // xc_func_info relevant functions:

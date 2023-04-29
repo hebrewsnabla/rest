@@ -58,6 +58,7 @@ pub struct SCF {
     //pub hamiltonian: Vec<Tensors<f64>>,
     pub hamiltonian: [MatrixUpper<f64>;2],
     pub scftype: SCFType,
+    pub is_dfa: bool,
     #[pyo3(get,set)]
     pub occupation: [Vec<f64>;2],
     #[pyo3(get,set)]
@@ -99,6 +100,7 @@ impl SCF {
             density_matrix: vec![MatrixFull::empty(),
                                  MatrixFull::empty()],
             scftype: SCFType::RHF,
+            is_dfa: false,
             occupation: [vec![],vec![]],
             homo: [0,0],
             lumo: [0,0],
@@ -127,6 +129,8 @@ impl SCF {
                 if mol.ctrl.print_level>0 {println!("Unrestricted Hartree-Fock (or Kohn-Sham) algorithm is invoked.")}
             },
         };
+
+        scf_data.is_dfa = mol.xc_data.is_dfa_scf();
 
         scf_data.generate_occupation();
 
@@ -239,7 +243,7 @@ impl SCF {
 
         time_mark.new_item("DFT Grids", "the generation of DFT grids");
         time_mark.count_start("DFT Grids");
-        new_scf.grids = if new_scf.mol.xc_data.is_dfa_scf() {
+        new_scf.grids = if new_scf.is_dfa {
             let grids = Grids::build(&new_scf.mol);
             if new_scf.mol.ctrl.print_level>0 {
                 println!("Grid size: {:}", grids.coordinates.len());

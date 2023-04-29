@@ -28,7 +28,7 @@ use std::path::Iter;
 use std::sync::mpsc::channel;
 
 //extern crate rest_libxc  as libxc;
-use libxc::{XcFuncType, LibXCFamily};
+use libxc::{XcFuncType, LibXCFamily, deriv_length};
 //use std::intrinsics::expf64;
 
 #[derive(Clone,Debug)]
@@ -497,7 +497,174 @@ impl DFA4REST {
         is_flag
     }
 
-    pub fn xc_exc_vxc(&self, grids: &Grids, spin_channel: usize, dm: &Vec<MatrixFull<f64>>, mo: &[MatrixFull<f64>;2], occ: &[Vec<f64>;2], print_level:usize) -> (Vec<f64>, Vec<MatrixFull<f64>>) {
+    pub fn xc_fxc_vmat(&self, grids: &mut Grids, spin_channel: usize, 
+                          dm0: &mut Vec<MatrixFull<f64>>,
+                          dm1: &mut Vec<MatrixFull<f64>>, 
+                          //mo: &[MatrixFull<f64>;2], occ: &[Vec<f64>;2], 
+                          print_level:usize
+                        ) -> Vec<MatrixFull<f64>> {
+        let (exc, vrho, vsigma, v2rho2, v2rhosigma, v2sigma2) = self.xc_exc_vxc_fxc(grids, spin_channel, dm0, print_level);
+        
+        let rho1 = grids.prepare_tabulated_density(dm1, spin_channel);
+        let rho1p = grids.prepare_tabulated_rhop(dm1, spin_channel);
+        
+        let num_grids = grids.coordinates.len();
+        let num_basis = dm0[0].size[0];
+        let mut fxc_ao = vec![MatrixFull::new([num_basis,num_grids],0.0);spin_channel];
+        
+        if let Some(ao) = &grids.ao {
+            let ao_ref = ao.to_matrixfullslice();
+            // for vrho
+            if spin_channel==1 {
+                let mut fxc_ao_s = &mut fxc_ao[0];
+                let v2rho2_s = v2rho2.slice_column(0);
+                let ao_ref = ao.to_matrixfullslice();
+                // generate vxc grid by grid
+                contract_vxc_0(fxc_ao_s, &ao_ref, v2rho2_s, None);
+            } else {
+                panic!("not implemented");
+            }
+            // for vsigma
+            if self.use_density_gradient() {
+                let mut fxc_ao_s = &mut fxc_ao[0];
+                // ao . (nabla rho1) . 2 frg . (nabla rho)
+                let rhop_s = rhop.get_reducing_matrix(0).unwrap();
+                let rho1p_s = rho1p.get_reducing_matrix(0).unwrap();
+                let v2rhosigma_s = v2rhosigma.slice_column(0);
+                let mut rho1p_rhop = MatrixFull::new([1,num_grids],0.0);
+                for x in 0usize..3usize {
+                    let rhop_s_x = rhop_s.get_slice_x(x);
+                    let rho1p_s_x = rho1p_s.get_slice_x(x);
+                    contract_vxc_0(rho1p_rhop, &rho1p_s_x, &rhop_s_x);
+                }
+
+                let mut tmp = MatrixFull::new([1, num_grids],0.0);
+                contract_vxc_0(&mut tmp, &rho1p_rhop.to_matrixfullslice(), v2rhosigma_s, Some(2.0));
+                contract_vxc_0(fxc_ao_s, &ao.to_matrixfullslice(), &tmp.data, None);
+                }
+                if let Some(aop) = &grids.aop {
+                    if spin_channel==1 {
+                        // vxc_ao_s: the shape of [num_basis, num_grids]
+                        let mut vxc_ao_s = &mut vxc_ao[0];
+                        // vsigma_s: a slice with the length of [num_grids]
+                        let v2rhosigma_s = v2rhosigma.slice_column(0);
+                        let v2sigma2_s = v2sigma2.slice_column(0);
+                        // rhop_s:  the shape of [num_grids, 3]
+                        let rhop_s = rhop.get_reducing_matrix(0).unwrap();
+                        let rho1p_s = rho1p.get_reducing_matrix(0).unwrap();
+                        
+                        // aop . (rho1 . 2 frg + rho1p . rhop . 4 fgg ) . rhop
+                        let mut wao = MatrixFull::new([num_basis, num_grids],0.0);
+                        for x in 0usize..3usize {
+                            // aop_x: the shape of [num_basis, num_grids]
+                            let aop_x = aop.get_reducing_matrix(x).unwrap();
+                            // rhop_s_x: a slice with the length of [num_grids]
+                            let rhop_s_x = rhop_s.get_slice_x(x);
+                            contract_vxc_0(&mut wao, &aop_x, rhop_s_x, None);
+                        }
+                        let mut tmp = MatrixFull::new([1, num_grids],0.0);
+                        contract_vxc_0(&mut tmp, &rho1.to_matrixfullslice(), v2rhosigma_s, Some(2.0))
+                        contract_vxc_0(&mut tmp, &rho1p_rhop.to_matrixfullslice(), v2sigma2_s, Some(4.0))
+                        contract_vxc_0(vxc_ao_s, &wao.to_matrixfullslice(), &tmp.data, None);
+
+                    } else {
+                        panic!("not implemented");
+
+                    }
+                }
+            }
+        }
+
+        fxc_vmat
+    }
+
+    pub fn xc_exc_vxc_fxc(&self, grids: &mut Grids, spin_channel: usize, 
+                          dm: &mut Vec<MatrixFull<f64>>, 
+                          //mo: &[MatrixFull<f64>;2], occ: &[Vec<f64>;2], 
+                          print_level:usize
+                        ) -> (MatrixFull<f64>, 
+                        MatrixFull<f64>, MatrixFull<f64>, 
+                        MatrixFull<f64>, MatrixFull<f64>, MatrixFull<f64>) {
+        // return:
+        //   exc, (vrho, vsigma), (v2rho2, v2rhosigma, v2sigma2)
+        let num_grids = grids.coordinates.len();
+        let num_basis = dm[0].size[0];
+        let mut exc = MatrixFull::new([num_grids,1],0.0);
+        //let mut exc_total = vec![0.0;spin_channel];
+        //let mut vxc_ao = vec![MatrixFull::new([num_basis,num_grids],0.0);spin_channel];
+        let dt0 = utilities::init_timing();
+
+        let rho = grids.prepare_tabulated_density(dm, spin_channel);
+        let rhop = grids.prepare_tabulated_rhop(dm, spin_channel);
+        let dt2 = utilities::timing(&dt0, Some("evaluate rho and rhop"));
+        let sigma = if self.use_density_gradient() {
+            prepare_tabulated_sigma_rayon(&rhop, spin_channel)
+        } else {
+            MatrixFull::empty()
+        };
+
+        let mut vrho = MatrixFull::new([num_grids,spin_channel],0.0);
+        let l_v2rho2 = deriv_length("v2rho2")[spin_channel-1];
+        let mut v2rho2 = MatrixFull::new([num_grids,l_v2rho2],0.0);
+
+        let mut vsigma = MatrixFull::empty();
+        let mut v2rhosigma = MatrixFull::empty();
+        let mut v2sigma2 = MatrixFull::empty();
+        if self.use_density_gradient() {
+            let l_vsigma = deriv_length("vsigma")[spin_channel-1];
+            let mut vsigma = MatrixFull::new([num_grids,l_vsigma],0.0);
+            let l_v2rhosigma = deriv_length("v2rhosigma")[spin_channel-1];
+            let mut v2rhosigma = MatrixFull::new([num_grids,l_v2rhosigma],0.0);
+            let l_v2sigma2 = deriv_length("v2sigma2")[spin_channel-1];
+            let mut v2sigma2 = MatrixFull::new([num_grids,l_v2sigma2],0.0);
+        } 
+        let dt3 = utilities::timing(&dt2, Some("evaluate sigma"));
+        self.dfa_compnt_scf.iter().zip(self.dfa_paramr_scf.iter()).for_each(|(xc_func,xc_para)| {
+            let xc_func = self.init_libxc(xc_func);
+            match xc_func.xc_func_family {
+                libxc::LibXCFamily::LDA => {
+                    if spin_channel==1 {
+                        let (tmp_exc,tmp_vrho,tmp_v2rho2) = xc_func.lda_exc_vxc_fxc(rho.data_ref().unwrap());
+                        let tmp_exc = MatrixFull::from_vec([num_grids,1],tmp_exc).unwrap();
+                        let tmp_vrho = MatrixFull::from_vec([num_grids,1],tmp_vrho).unwrap();
+                        let tmp_v2rho2 = MatrixFull::from_vec([num_grids,1],tmp_v2rho2).unwrap();
+                        exc.par_self_scaled_add(&tmp_exc,*xc_para);
+                        vrho.par_self_scaled_add(&tmp_vrho,*xc_para);
+                        v2rho2.par_self_scaled_add(&tmp_v2rho2,*xc_para);   
+                    } else {
+                        panic!("not implemented");
+                    }
+                },
+                libxc::LibXCFamily::GGA | libxc::LibXCFamily::HybridGGA => {
+                    if spin_channel==1 {
+                        let (tmp_exc,tmp_vrho, tmp_vsigma,
+                             tmp_v2rho2, tmp_v2rhosigma, tmp_v2sigma2) = xc_func.gga_exc_vxc_fxc(rho.data_ref().unwrap(),sigma.data_ref().unwrap());
+                        let tmp_exc = MatrixFull::from_vec([num_grids,1],tmp_exc).unwrap();
+                        let tmp_vrho = MatrixFull::from_vec([num_grids,1],tmp_vrho).unwrap();
+                        let tmp_vsigma= MatrixFull::from_vec([num_grids,1],tmp_vsigma).unwrap();
+                        let tmp_v2rho2 = MatrixFull::from_vec([num_grids,1],tmp_v2rho2).unwrap();
+                        let tmp_v2rhosigma= MatrixFull::from_vec([num_grids,1],tmp_v2rhosigma).unwrap();
+                        let tmp_v2sigma2= MatrixFull::from_vec([num_grids,1],tmp_v2sigma2).unwrap();
+                        exc.par_self_scaled_add(&tmp_exc,*xc_para);
+                        vrho.par_self_scaled_add(&tmp_vrho,*xc_para);
+                        vsigma.par_self_scaled_add(&tmp_vsigma, *xc_para);
+                        v2rho2.par_self_scaled_add(&tmp_v2rho2,*xc_para);
+                        v2rhosigma.par_self_scaled_add(&tmp_v2rhosigma,*xc_para);
+                        v2sigma2.par_self_scaled_add(&tmp_v2sigma2, *xc_para);
+                    } else {
+                        panic!("not implemented");
+                    }
+                },
+                _ => {println!("{} is not yet implemented", xc_func.get_family_name())}
+            }
+        });
+        let dt4 = utilities::timing(&dt3, Some("evaluate vrho, vsigma and second deriv (if needed)"));
+    (exc, vrho,vsigma, v2rho2,v2rhosigma,v2sigma2)
+    }
+
+    pub fn xc_exc_vxc(&self, grids: &Grids, spin_channel: usize, 
+                      dm: &Vec<MatrixFull<f64>>, mo: &[MatrixFull<f64>;2], occ: &[Vec<f64>;2], 
+                      print_level:usize) -> (Vec<f64>, Vec<MatrixFull<f64>>) {
         let num_grids = grids.coordinates.len();
         let num_basis = dm[0].size[0];
         let mut exc = MatrixFull::new([num_grids,1],0.0);
