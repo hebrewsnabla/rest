@@ -314,7 +314,7 @@ impl SCF {
                 d1[ispin].self_add( &mut d1_t );
                 //d1[ispin].formated_output(num_basis, "full");            
             }
-            let mut vind = self.response_fn_hf(&d1, external);
+            let mut vind = self.response_fn(&mut d1, external);
             for ispin in 0..spin_channel {
                 let occ = _occ[ispin];
                 let vir = _vir[ispin];
@@ -344,35 +344,55 @@ impl SCF {
     //        return Err(anyhow!("UHF->GHF stability not implemented"))
     //    //}
     //}
-    pub fn response_fn_hf(&mut self, dm: &Vec<MatrixFull<f64>>,
+    pub fn response_fn(&mut self, dm: &mut Vec<MatrixFull<f64>>,
+        //scaling_factor: f64,
+        external: bool
+        ) -> Vec<MatrixFull<f64>> {
+        let mut hyb = 1.0f64;
+        if self.is_dfa {
+            hyb = self.mol.xc_data.dfa_hybrid_scf;
+        }
+        let mut vind = self.response_fn_hf(dm, external, hyb);
+        if self.is_dfa {
+            let mut vind_dfa = self.response_fn_dfa(dm, external);
+        }
+        vind
+    }
+    
+    pub fn response_fn_hf(&mut self, dm: &mut Vec<MatrixFull<f64>>,
                                       //scaling_factor: f64,
-                                      external: bool
+                                      external: bool,
+                                      hyb: f64
                                       ) -> Vec<MatrixFull<f64>> {
         if self.mol.ctrl.spin_channel == 1 {
             if external {
-                let mut vind = self.response_vk_full_with_ri_v( &dm, -0.5);
+                let mut vind = self.response_vk_full_with_ri_v( dm, -0.5*hyb);
                 vind
             } else {
                 // vj - 0.5*vk
-                let mut vj = self.response_vj_full_with_ri_v( &dm, 1.0);
-                let mut vk = self.response_vk_full_with_ri_v( &dm, 1.0);
+                let mut vj = self.response_vj_full_with_ri_v( dm, 1.0);
                 let mut vind = vj.clone();
-                vind[0] = vj[0].scaled_add(&vk[0], -0.5).unwrap();
+                if hyb != 0.0f64 {
+                    let mut vk = self.response_vk_full_with_ri_v( dm, 1.0);
+                    vind[0] = vj[0].scaled_add(&vk[0], -0.5*hyb).unwrap();
+                }
                 vind
             }
         } else {
             if external {
-                let mut vind = self.response_vk_full_with_ri_v( &dm, -1.0);
+                let mut vind = self.response_vk_full_with_ri_v( dm, -1.0*hyb);
                 vind
             } else {
                 // vind[ispin] = vj[alpha] + vj[beta] - vk[ispin]
-                let mut vj = self.response_vj_full_with_ri_v( &dm, 1.0);
-                let mut vk = self.response_vk_full_with_ri_v( &dm, -1.0);
-                let mut vind = vk.clone();
-                vind[0].self_add(&vj[0]);
+                let mut vj = self.response_vj_full_with_ri_v( dm, 1.0);
+                let mut vind = vj.clone();
                 vind[0].self_add(&vj[1]);
                 vind[1].self_add(&vj[0]);
-                vind[1].self_add(&vj[1]);
+                if hyb != 0.0f64 {
+                    let mut vk = self.response_vk_full_with_ri_v( dm, -1.0*hyb);
+                    vind[0].self_add(&vk[0]);
+                    vind[1].self_add(&vk[1]);
+                }
                 //vj[0].formated_output(vj[0].size[0], "full");            
                 //vj[1].formated_output(vj[0].size[0], "full");            
                 //vk[0].formated_output(vj[0].size[0], "full");            
@@ -382,6 +402,53 @@ impl SCF {
 
         }
     }
+
+    pub fn response_fn_dfa(&mut self, dm: &mut Vec<MatrixFull<f64>>,
+        //scaling_factor: f64,
+        external: bool
+        ) -> Vec<MatrixFull<f64>> {
+        let mut dm0 = self.density_matrix.clone();
+        //rho, vxc, fxc = self.transformed_vxc_fxc();
+        if self.mol.ctrl.spin_channel == 1 {
+            
+            if external {
+                let mut vind = self.response_fxc_st(&mut dm0, dm);
+                vind[0].self_multiple(0.5f64);
+                vind
+            } else {
+                let mut vind = self.response_fxc(&mut dm0, dm);
+                vind
+            }
+
+        } else {
+
+        panic!("not implemented");
+
+        }
+    }
+
+
+
+    pub fn response_fxc_st(&mut self, dm0: &mut Vec<MatrixFull<f64>>,
+                           dm: &mut Vec<MatrixFull<f64>>
+                        ) -> Vec<MatrixFull<f64>> {
+        let mut vmat = vec![];
+        let spin_channel = self.mol.ctrl.spin_channel;
+        if spin_channel == 1 {
+            if let Some(grids) = &mut self.grids {
+                vmat = self.mol.xc_data.xc_fxc_vmat(grids, spin_channel, dm0, dm, 3);
+            }
+        }
+        vmat
+    }
+
+    pub fn response_fxc(&mut self, dm0: &Vec<MatrixFull<f64>>,
+                           dm: &Vec<MatrixFull<f64>>
+                        ) -> Vec<MatrixFull<f64>> {
+        panic!("not implemented");
+
+    }
+
 
 
     // Currently response fn can only be calculated with ri
@@ -409,8 +476,15 @@ impl SCF {
                                       scaling_factor: f64) -> Vec<MatrixFull<f64>> {
         let spin_channel = self.mol.spin_channel;
         //let dm = &self.density_matrix;
-
-        vk_full_fromdm_with_ri_v(&self.ri3fn, dm, spin_channel, scaling_factor)
+        if scaling_factor != 0.0f64 {
+            vk_full_fromdm_with_ri_v(&self.ri3fn, dm, spin_channel, scaling_factor)
+        } else {
+            let num_basis = dm[0].size[0];
+            let zerovk = MatrixFull::new([num_basis,num_basis],0.0f64);
+            let mut vk = vec![zerovk.clone(), MatrixFull::empty()];
+            if spin_channel == 2 { vk[1] = zerovk.clone()}
+            vk
+        }
     }
 
 }
