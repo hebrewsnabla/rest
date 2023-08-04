@@ -575,7 +575,7 @@ impl DFA4REST {
         is_flag
     }
 
-    pub fn xc_fxc_vmat(&self, grids: &mut Grids, spin_channel: usize, 
+    pub fn xc_fxc_ao(&self, grids: &mut Grids, spin_channel: usize, 
                           dm0: &mut Vec<MatrixFull<f64>>,
                           dm1: &mut Vec<MatrixFull<f64>>, 
                           //mo: &[MatrixFull<f64>;2], occ: &[Vec<f64>;2], 
@@ -583,6 +583,8 @@ impl DFA4REST {
                         ) -> Vec<MatrixFull<f64>> {
         let (exc, vrho, vsigma, v2rho2, v2rhosigma, v2sigma2) = self.xc_exc_vxc_fxc(grids, spin_channel, dm0, print_level);
         
+        let rho = grids.prepare_tabulated_density(dm0, spin_channel);
+        let rhop = grids.prepare_tabulated_rhop(dm0, spin_channel);
         let rho1 = grids.prepare_tabulated_density(dm1, spin_channel);
         let rho1p = grids.prepare_tabulated_rhop(dm1, spin_channel);
         
@@ -592,17 +594,20 @@ impl DFA4REST {
         
         if let Some(ao) = &grids.ao {
             let ao_ref = ao.to_matrixfullslice();
-            // for vrho
+            // for frr
             if spin_channel==1 {
                 let mut fxc_ao_s = &mut fxc_ao[0];
                 let v2rho2_s = v2rho2.slice_column(0);
                 let ao_ref = ao.to_matrixfullslice();
-                // generate vxc grid by grid
-                contract_vxc_0(fxc_ao_s, &ao_ref, v2rho2_s, None);
+                let mut tmp = MatrixFull::from_vec([num_grids,1], v2rho2_s.to_vec()).unwrap();
+                tmp.iter_mut().zip(rho1.iter()).for_each(|(f,r)| {*f *= *r});
+                contract_vxc_0(fxc_ao_s, &ao_ref, tmp.slice_column(0), None);
+                //let rho1_s = rho1.get_reducing_matrix(0).unwrap();
+                println!("frr");
             } else {
                 panic!("not implemented");
             }
-            // for vsigma
+            // for frg fgg
             if self.use_density_gradient() {
                 let mut fxc_ao_s = &mut fxc_ao[0];
                 // ao . (nabla rho1) . 2 frg . (nabla rho)
@@ -613,25 +618,28 @@ impl DFA4REST {
                 for x in 0usize..3usize {
                     let rhop_s_x = rhop_s.get_slice_x(x);
                     let rho1p_s_x = rho1p_s.get_slice_x(x);
-                    contract_vxc_0(rho1p_rhop, &rho1p_s_x, &rhop_s_x);
+                    rho1p_rhop.iter_mut().zip( rho1p_s_x.iter()).zip(rhop_s_x.iter()).for_each(
+                        |((x, y), z)| {*x += y * z}
+                    );
                 }
 
                 let mut tmp = MatrixFull::new([1, num_grids],0.0);
                 contract_vxc_0(&mut tmp, &rho1p_rhop.to_matrixfullslice(), v2rhosigma_s, Some(2.0));
                 contract_vxc_0(fxc_ao_s, &ao.to_matrixfullslice(), &tmp.data, None);
-                }
+                
                 if let Some(aop) = &grids.aop {
                     if spin_channel==1 {
                         // vxc_ao_s: the shape of [num_basis, num_grids]
-                        let mut vxc_ao_s = &mut vxc_ao[0];
+                        //let mut vxc_ao_s = &mut vxc_ao[0];
                         // vsigma_s: a slice with the length of [num_grids]
                         let v2rhosigma_s = v2rhosigma.slice_column(0);
                         let v2sigma2_s = v2sigma2.slice_column(0);
+                        let vsigma_s = vsigma.slice_column(0);
                         // rhop_s:  the shape of [num_grids, 3]
                         let rhop_s = rhop.get_reducing_matrix(0).unwrap();
                         let rho1p_s = rho1p.get_reducing_matrix(0).unwrap();
                         
-                        // aop . (rho1 . 2 frg + rho1p . rhop . 4 fgg ) . rhop
+                        // aop . (rho1 . 2 frg + rho1p . rhop . 4 fgg + 2 fg ) . rhop
                         let mut wao = MatrixFull::new([num_basis, num_grids],0.0);
                         for x in 0usize..3usize {
                             // aop_x: the shape of [num_basis, num_grids]
@@ -641,9 +649,10 @@ impl DFA4REST {
                             contract_vxc_0(&mut wao, &aop_x, rhop_s_x, None);
                         }
                         let mut tmp = MatrixFull::new([1, num_grids],0.0);
-                        contract_vxc_0(&mut tmp, &rho1.to_matrixfullslice(), v2rhosigma_s, Some(2.0))
-                        contract_vxc_0(&mut tmp, &rho1p_rhop.to_matrixfullslice(), v2sigma2_s, Some(4.0))
-                        contract_vxc_0(vxc_ao_s, &wao.to_matrixfullslice(), &tmp.data, None);
+                        contract_vxc_0(&mut tmp, &rho1.to_matrixfullslice(), v2rhosigma_s, Some(2.0));
+                        contract_vxc_0(&mut tmp, &rho1p_rhop.to_matrixfullslice(), v2sigma2_s, Some(4.0));
+                        tmp.iter_mut().zip(vsigma_s.iter()).for_each(|(t,v)| {*t += v*2.0f64});
+                        contract_vxc_0(fxc_ao_s, &wao.to_matrixfullslice(), &tmp.data, None);
 
                     } else {
                         panic!("not implemented");
@@ -653,7 +662,13 @@ impl DFA4REST {
             }
         }
 
-        fxc_vmat
+        for i_spin in 0..spin_channel {
+            let fxc_ao_s = fxc_ao.get_mut(i_spin).unwrap();
+            fxc_ao_s.iter_columns_full_mut().zip(grids.weights.iter()).for_each(|(fxc_ao_s,w)| {
+                fxc_ao_s.iter_mut().for_each(|f| {*f *= *w})
+            });
+        }
+        fxc_ao
     }
 
     pub fn xc_exc_vxc_fxc(&self, grids: &mut Grids, spin_channel: usize, 
@@ -690,11 +705,11 @@ impl DFA4REST {
         let mut v2sigma2 = MatrixFull::empty();
         if self.use_density_gradient() {
             let l_vsigma = deriv_length("vsigma")[spin_channel-1];
-            let mut vsigma = MatrixFull::new([num_grids,l_vsigma],0.0);
+            vsigma = MatrixFull::new([num_grids,l_vsigma],0.0);
             let l_v2rhosigma = deriv_length("v2rhosigma")[spin_channel-1];
-            let mut v2rhosigma = MatrixFull::new([num_grids,l_v2rhosigma],0.0);
+            v2rhosigma = MatrixFull::new([num_grids,l_v2rhosigma],0.0);
             let l_v2sigma2 = deriv_length("v2sigma2")[spin_channel-1];
-            let mut v2sigma2 = MatrixFull::new([num_grids,l_v2sigma2],0.0);
+            v2sigma2 = MatrixFull::new([num_grids,l_v2sigma2],0.0);
         } 
         let dt3 = utilities::timing(&dt2, Some("evaluate sigma"));
         self.dfa_compnt_scf.iter().zip(self.dfa_paramr_scf.iter()).for_each(|(xc_func,xc_para)| {
@@ -725,6 +740,7 @@ impl DFA4REST {
                         let tmp_v2sigma2= MatrixFull::from_vec([num_grids,1],tmp_v2sigma2).unwrap();
                         exc.par_self_scaled_add(&tmp_exc,*xc_para);
                         vrho.par_self_scaled_add(&tmp_vrho,*xc_para);
+                        //println!("{:?} {:?}", vsigma.size, tmp_vsigma.size);
                         vsigma.par_self_scaled_add(&tmp_vsigma, *xc_para);
                         v2rho2.par_self_scaled_add(&tmp_v2rho2,*xc_para);
                         v2rhosigma.par_self_scaled_add(&tmp_v2rhosigma,*xc_para);
@@ -2147,7 +2163,7 @@ impl Grids {
                         acc + a*b
                     })
                 });
-                println!("{:?}", &cur_rho.data[num_grids*i_spin..num_grids*i_spin+100]);
+                //println!("{:?}", &cur_rho.data[num_grids*i_spin..num_grids*i_spin+100]);
                 let dt2 = utilities::timing(&dt1, Some("Contracting ao*wao"));
             };
         };

@@ -14,6 +14,7 @@ use itertools::{//Itertools,
                 //izip
                 };
 use tensors::MathMatrix;
+use crate::utilities;
 use crate::anyhow::{anyhow,Error};
 
 impl SCF {
@@ -29,57 +30,29 @@ impl SCF {
         let spin_channel = self.mol.ctrl.spin_channel;
         let print_level = self.mol.ctrl.print_level;
         let params = DavidsonParams{tol:1e-4, maxspace:15, ..DavidsonParams::default()};
-        let mut conv:Vec<bool> = vec![];
-        let mut e:Vec<f64> = vec![];
         let mut v_i:Vec<Vec<f64>> = vec![];
         let mut v_e:Vec<Vec<f64>> = vec![];
         let mut stable_i = true;
         let mut stable_e = true;
         let mut stable:Vec<bool> = vec![];
         let mut v:Vec<Vec<Vec<f64>>> = vec![];
-        let stable_str = ["unstable", "stable"];
         if spin_channel == 1 {
-            println!("Start RHF internal stability check");
-            // slow algorithm, for debug
-            //self.formated_eigenvectors();
-            //self.generate_h_rhf_slow();
-            let (mut g, mut hdiag, mut h_op) = self.generate_g_hop(false).unwrap();
-            let ov = g.len();
-            //hdiag.iter_mut().map(|h| *h *= 2.0_f64);
-            let mut x0 = vec![0.0_f64;ov];
-            x0.iter_mut().zip(hdiag.iter()).for_each(|(x, hd)| //if gg.abs() > 1e-8 
-                                                               {*x += 1.0 / hd});
-            //println!("hdiag {:?}", hdiag);
-            //println!("x0 {:?}", x0);
-            (conv, e, v_i) = davidson_solve(h_op, &mut x0, &mut hdiag, 
-                                              &params,
-                                              print_level
-                           ); 
-            stable_i = e[0] > -1e-5;
-            println!("RHF internal : {:?}", stable_str[stable_i as usize]);
-            stable.push(stable_i);
-            v.push(v_i);
-            //return Ok((stable,v));
-            println!("Start RHF external stability check");
-            let (mut g2, mut hdiag2, mut h_op2) = self.generate_g_hop(true).unwrap();
-            //let ov = g.len();
-            //hdiag.iter_mut().for_each(|h| *h *= 2.0_f64);
-            x0 = vec![0.0_f64;ov];
-            x0.iter_mut().zip(hdiag2.iter()).for_each(|(x, hd)| //if gg.abs() > 1e-8 
-                                                               {*x += 1.0 / hd});
-            //println!("{:?}", g);
-            //println!("x0 {:?}", x0);
-            (conv, e, v_e) = davidson_solve(h_op2, &mut x0, &mut hdiag2, 
-                                              &params,
-                                              print_level
-                           ); 
-            stable_e = e[0] > -1e-5;
-            println!("RHF -> UHF : {:?}", stable_str[stable_e as usize]);
+            //println!("{}", !self.is_dfa);
+            //if !self.is_dfa {
+                let (stable_i, v_i) = self.stability_rhf(false, &params, print_level);
+                stable.push(stable_i);
+                v.push(v_i);
+            //}
+            if !self.is_dfa {
+            let (stable_e, v_e) = self.stability_rhf(true, &params, print_level);
             stable.push(stable_e);
             v.push(v_e);
-
+            }
         }
         else {
+        let mut conv:Vec<bool> = vec![];
+        let mut e:Vec<f64> = vec![];
+            let stable_str = ["unstable", "stable"];
             println!("Start UHF internal stability check");
             let (mut g, mut hdiag, mut h_op) = self.generate_g_hop(false).unwrap();
             let ov = g.len();
@@ -101,6 +74,35 @@ impl SCF {
         }
         Ok((stable,v))
 
+    }
+    
+    pub fn stability_rhf(&mut self, external: bool, 
+                      params: &DavidsonParams, print_level: usize) -> (bool, Vec<Vec<f64>>) {
+        let mut conv:Vec<bool> = vec![];
+        let mut e:Vec<f64> = vec![];
+        let mut v_i:Vec<Vec<f64>> = vec![];
+        let stable_str = ["unstable", "stable"];
+        let inex_str = ["internal", "external"];
+        println!("Start RHF {:?} stability check", inex_str[external as usize]);
+            // slow algorithm, for debug
+            //self.formated_eigenvectors();
+            //self.generate_h_rhf_slow();
+        let (mut g, mut hdiag, mut h_op) = self.generate_g_hop(external).unwrap();
+        let ov = g.len();
+        //hdiag.iter_mut().map(|h| *h *= 2.0_f64);
+        let mut x0 = vec![0.0_f64;ov];
+        x0.iter_mut().zip(hdiag.iter()).for_each(|(x, hd)| //if gg.abs() > 1e-8 
+                                                           {*x += 1.0 / hd});
+        //println!("hdiag {:?}", hdiag);
+        //println!("x0 {:?}", x0);
+        (conv, e, v_i) = davidson_solve(h_op, &mut x0, &mut hdiag, 
+                                              &params,
+                                              print_level
+                           ); 
+        let stable_i = e[0] > -1e-5;
+        println!("RHF {:?} : {:?}", inex_str[external as usize], stable_str[stable_i as usize]);
+        //return Ok((stable,v));
+        (stable_i, v_i)
     }
 
     pub fn generate_h_rhf_slow(&mut self) //-> MatrixFull<f64> 
@@ -355,6 +357,10 @@ impl SCF {
         let mut vind = self.response_fn_hf(dm, external, hyb);
         if self.is_dfa {
             let mut vind_dfa = self.response_fn_dfa(dm, external);
+            let spin_channel = self.mol.ctrl.spin_channel;
+            for ispin in 0..spin_channel {
+                vind[ispin].self_scaled_add(&vind_dfa[ispin], 1.0f64);
+            }
         }
         vind
     }
@@ -410,7 +416,8 @@ impl SCF {
         let mut dm0 = self.density_matrix.clone();
         //rho, vxc, fxc = self.transformed_vxc_fxc();
         if self.mol.ctrl.spin_channel == 1 {
-            
+
+            println!("response_fn_dfa for {}", external);
             if external {
                 let mut vind = self.response_fxc_st(&mut dm0, dm);
                 vind[0].self_multiple(0.5f64);
@@ -432,24 +439,93 @@ impl SCF {
     pub fn response_fxc_st(&mut self, dm0: &mut Vec<MatrixFull<f64>>,
                            dm: &mut Vec<MatrixFull<f64>>
                         ) -> Vec<MatrixFull<f64>> {
+        panic!("not implemented");
+        // should call response_fxc
+    }
+
+    pub fn response_fxc(&mut self, dm0: &mut Vec<MatrixFull<f64>>,
+                           dm: &mut Vec<MatrixFull<f64>>
+                        ) -> Vec<MatrixFull<f64>> {
         let mut vmat = vec![];
         let spin_channel = self.mol.ctrl.spin_channel;
         if spin_channel == 1 {
             if let Some(grids) = &mut self.grids {
-                vmat = self.mol.xc_data.xc_fxc_vmat(grids, spin_channel, dm0, dm, 3);
+                //vmat = self.mol.xc_data.xc_fxc_vmat(grids, spin_channel, dm0, dm, 3);
+                vmat = self.generate_fxc(dm0, dm, 1.0f64);
             }
         }
         vmat
-    }
-
-    pub fn response_fxc(&mut self, dm0: &Vec<MatrixFull<f64>>,
-                           dm: &Vec<MatrixFull<f64>>
-                        ) -> Vec<MatrixFull<f64>> {
-        panic!("not implemented");
 
     }
 
 
+    pub fn generate_fxc(&mut self, dm0: &mut Vec<MatrixFull<f64>>,
+                        dm: &mut Vec<MatrixFull<f64>>, 
+                        scaling_factor: f64) -> Vec<MatrixFull<f64>> {
+        let num_basis = self.mol.num_basis;
+        let num_state = self.mol.num_state;
+        let num_auxbas = self.mol.num_auxbas;
+        let npair = num_basis*(num_basis+1)/2;
+        let spin_channel = self.mol.spin_channel;
+        //let mut vxc: MatrixUpper<f64> = MatrixUpper::new(1,0.0f64);
+        //let mut fxc:Vec<MatrixFull<f64>> = vec![MatrixFull::empty();spin_channel];
+        //let mut exc_spin:Vec<f64> = vec![];
+        //let mut exc_total:f64 = 0.0;
+        let mut fxc_mf:Vec<MatrixFull<f64>> = vec![MatrixFull::empty();spin_channel];
+        //let dm = &mut self.density_matrix;
+        let mo = &mut self.eigenvectors;
+        let occ = &mut self.occupation;
+        let print_level = self.mol.ctrl.print_level;
+        if let Some(grids) = &mut self.grids {
+            let dt0 = utilities::init_timing();
+            let mut fxc_ao = self.mol.xc_data.xc_fxc_ao(grids, spin_channel, dm0, dm, print_level);
+            let dt1 = utilities::timing(&dt0, Some("Total fxc_ao time"));
+            //exc_spin = exc;
+            if let Some(ao) = &mut grids.ao {
+                // Evaluate the exchange-correlation energy
+                //exc_total = izip!(grids.weights.iter(),exc.data.iter()).fold(0.0,|acc,(w,e)| {
+                //    acc + w*e
+                //});
+                for i_spin in 0..spin_channel {
+                    let fxc_mf_s = fxc_mf.get_mut(i_spin).unwrap();
+                    *fxc_mf_s = MatrixFull::new([num_basis,num_basis],0.0f64);
+                    let fxc_ao_s = fxc_ao.get_mut(i_spin).unwrap();
+                    fxc_mf_s.lapack_dgemm(ao, fxc_ao_s, 'N', 'T', 1.0, 0.0);
+                    
+                }
+            }
+            let dt2 = utilities::timing(&dt1, Some("From fxc_ao to fxc"));
+        }
+
+        println!("fxc_mf {:?}", fxc_mf);
+
+        //let dt0 = utilities::init_timing();
+        //for i_spin in (0..spin_channel) {
+        //    let mut fxc_s = fxc.get_mut(i_spin).unwrap();
+        //    let mut fxc_mf_s = fxc_mf.get_mut(i_spin).unwrap();
+        //
+        //    fxc_mf_s.self_add(&fxc_mf_s.transpose());
+        //    fxc_mf_s.self_multiple(0.5);
+        //    //println!("debug vxc{}",i_spin);
+        //    //vxc_mf_s.formated_output(10, "full");
+        //    *fxc_s = fxc_mf_s.to_matrixupper();
+        //}
+        //
+        //utilities::timing(&dt0, Some("symmetrize fxc"));
+
+        //exc_total = exc_spin.iter().sum();
+
+
+        if scaling_factor!=1.0f64 {
+            //exc_total *= scaling_factor;
+            for i_spin in (0..spin_channel) {
+                fxc_mf[i_spin].data.iter_mut().for_each(|f| *f = *f*scaling_factor)
+            }
+        };
+
+        fxc_mf
+
+    }
 
     // Currently response fn can only be calculated with ri
     //
