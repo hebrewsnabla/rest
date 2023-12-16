@@ -603,7 +603,7 @@ impl DFA4REST {
                 tmp.iter_mut().zip(rho1.iter()).for_each(|(f,r)| {*f *= *r});
                 contract_vxc_0(fxc_ao_s, &ao_ref, tmp.slice_column(0), None);
                 //let rho1_s = rho1.get_reducing_matrix(0).unwrap();
-                println!("frr");
+                //println!("frr");
             } else {
                 panic!("not implemented");
             }
@@ -626,6 +626,7 @@ impl DFA4REST {
                 let mut tmp = MatrixFull::new([1, num_grids],0.0);
                 contract_vxc_0(&mut tmp, &rho1p_rhop.to_matrixfullslice(), v2rhosigma_s, Some(2.0));
                 contract_vxc_0(fxc_ao_s, &ao.to_matrixfullslice(), &tmp.data, None);
+                fxc_ao_s.iter_mut().for_each(|f| {*f *= 0.5f64});
                 
                 if let Some(aop) = &grids.aop {
                     if spin_channel==1 {
@@ -639,7 +640,7 @@ impl DFA4REST {
                         let rhop_s = rhop.get_reducing_matrix(0).unwrap();
                         let rho1p_s = rho1p.get_reducing_matrix(0).unwrap();
                         
-                        // aop . (rho1 . 2 frg + rho1p . rhop . 4 fgg + 2 fg ) . rhop
+                        // aop . (rho1 . 2 frg + rho1p . rhop . 4 fgg ) . rhop
                         let mut wao = MatrixFull::new([num_basis, num_grids],0.0);
                         for x in 0usize..3usize {
                             // aop_x: the shape of [num_basis, num_grids]
@@ -651,8 +652,17 @@ impl DFA4REST {
                         let mut tmp = MatrixFull::new([1, num_grids],0.0);
                         contract_vxc_0(&mut tmp, &rho1.to_matrixfullslice(), v2rhosigma_s, Some(2.0));
                         contract_vxc_0(&mut tmp, &rho1p_rhop.to_matrixfullslice(), v2sigma2_s, Some(4.0));
-                        tmp.iter_mut().zip(vsigma_s.iter()).for_each(|(t,v)| {*t += v*2.0f64});
+                        //tmp.iter_mut().zip(vsigma_s.iter()).for_each(|(t,v)| {*t += v*2.0f64});
                         contract_vxc_0(fxc_ao_s, &wao.to_matrixfullslice(), &tmp.data, None);
+
+                        // aop . (2 fg ) . rho1p
+                        let mut wao1 = MatrixFull::new([num_basis, num_grids],0.0);
+                        for x in 0usize..3usize {
+                            let aop_x = aop.get_reducing_matrix(x).unwrap();
+                            let rho1p_s_x = rho1p_s.get_slice_x(x);
+                            contract_vxc_0(&mut wao1, &aop_x, rho1p_s_x, None);
+                        }
+                        contract_vxc_0(fxc_ao_s, &wao1.to_matrixfullslice(), vsigma_s, Some(2.0));
 
                     } else {
                         panic!("not implemented");

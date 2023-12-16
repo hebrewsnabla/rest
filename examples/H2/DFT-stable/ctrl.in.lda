@@ -1,5 +1,5 @@
 [ctrl]
-    print_level = 1
+    print_level = 4
     xc = "svwn-rpa"
     basis_path = "../../../basis-set-pool/cc-pVDZ"
     basis_type = "spheric"

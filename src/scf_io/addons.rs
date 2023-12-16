@@ -29,7 +29,7 @@ impl SCF {
         //
         let spin_channel = self.mol.ctrl.spin_channel;
         let print_level = self.mol.ctrl.print_level;
-        let params = DavidsonParams{tol:1e-4, maxspace:15, ..DavidsonParams::default()};
+        let params = DavidsonParams{tol:1e-6, maxspace:15, ..DavidsonParams::default()};
         let mut v_i:Vec<Vec<f64>> = vec![];
         let mut v_e:Vec<Vec<f64>> = vec![];
         let mut stable_i = true;
@@ -468,7 +468,7 @@ impl SCF {
         let npair = num_basis*(num_basis+1)/2;
         let spin_channel = self.mol.spin_channel;
         //let mut vxc: MatrixUpper<f64> = MatrixUpper::new(1,0.0f64);
-        //let mut fxc:Vec<MatrixFull<f64>> = vec![MatrixFull::empty();spin_channel];
+        let mut fxc:Vec<MatrixFull<f64>> = vec![MatrixFull::new([num_basis, num_basis], 0.0f64);spin_channel];
         //let mut exc_spin:Vec<f64> = vec![];
         //let mut exc_total:f64 = 0.0;
         let mut fxc_mf:Vec<MatrixFull<f64>> = vec![MatrixFull::empty();spin_channel];
@@ -497,21 +497,22 @@ impl SCF {
             let dt2 = utilities::timing(&dt1, Some("From fxc_ao to fxc"));
         }
 
-        println!("fxc_mf {:?}", fxc_mf);
 
-        //let dt0 = utilities::init_timing();
-        //for i_spin in (0..spin_channel) {
-        //    let mut fxc_s = fxc.get_mut(i_spin).unwrap();
-        //    let mut fxc_mf_s = fxc_mf.get_mut(i_spin).unwrap();
-        //
-        //    fxc_mf_s.self_add(&fxc_mf_s.transpose());
-        //    fxc_mf_s.self_multiple(0.5);
-        //    //println!("debug vxc{}",i_spin);
-        //    //vxc_mf_s.formated_output(10, "full");
-        //    *fxc_s = fxc_mf_s.to_matrixupper();
-        //}
-        //
-        //utilities::timing(&dt0, Some("symmetrize fxc"));
+        let dt0 = utilities::init_timing();
+        for i_spin in (0..spin_channel) {
+            let mut fxc_s = fxc.get_mut(i_spin).unwrap();
+            let mut fxc_mf_s = fxc_mf.get_mut(i_spin).unwrap();
+        
+            fxc_mf_s.self_add(&fxc_mf_s.transpose());
+            fxc_mf_s.self_multiple(0.5);
+            //println!("debug vxc{}",i_spin);
+            //vxc_mf_s.formated_output(10, "full");
+            *fxc_s += fxc_mf_s.clone();
+        }
+        println!("fxc {:?}", fxc[0]);
+        fxc[0].formated_output(10, "full");
+        
+        utilities::timing(&dt0, Some("symmetrize fxc"));
 
         //exc_total = exc_spin.iter().sum();
 
@@ -519,11 +520,11 @@ impl SCF {
         if scaling_factor!=1.0f64 {
             //exc_total *= scaling_factor;
             for i_spin in (0..spin_channel) {
-                fxc_mf[i_spin].data.iter_mut().for_each(|f| *f = *f*scaling_factor)
+                fxc[i_spin].data.iter_mut().for_each(|f| *f = *f*scaling_factor)
             }
         };
 
-        fxc_mf
+        fxc
 
     }
 
